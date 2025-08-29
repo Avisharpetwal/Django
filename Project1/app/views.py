@@ -108,6 +108,92 @@ def book_detail(request, pk):
         book.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+import pandas as pd
+from django.http import HttpResponse
+from rest_framework.parsers import MultiPartParser
+from rest_framework.decorators import parser_classes
+
+from .models import Book
+from .serializers import BookSerializer
+
+# ---------- 1. Download Book entries as Excel ----------
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def download_books_excel(request):
+    books = Book.objects.all()  # or filter(owner=request.user) if needed
+    data = []
+    for book in books:
+        data.append({
+            "title": book.title,
+            "author": book.author,
+            "unique_id": book.unique_id,
+            "publish_year": book.publish_year,
+            "copies_available": book.copies_available,
+            "is_available": book.is_available,
+            "owner": book.owner.username if book.owner else None
+        })
+    
+    df = pd.DataFrame(data)
+    response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = 'attachment; filename=books.xlsx'
+    df.to_excel(response, index=False)
+    return response
+
+# ---------- 2. Upload Excel file ----------
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser])
+def upload_books_excel(request):
+    """
+    Just upload the file and read its content. Don't save yet.
+    """
+    file = request.FILES.get('file')
+    if not file:
+        return Response({"error": "No file uploaded."}, status=400)
+    
+    try:
+        df = pd.read_excel(file)
+    except Exception as e:
+        return Response({"error": f"Invalid Excel file. {str(e)}"}, status=400)
+    
+    # Convert to JSON-like records to preview
+    records = df.to_dict(orient='records')
+    return Response({"uploaded_data": records})
+
+# ---------- 3. Save valid entries from uploaded Excel ----------
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser])
+def save_books_from_excel(request):
+    file = request.FILES.get('file')
+    if not file:
+        return Response({"error": "No file uploaded."}, status=400)
+    
+    try:
+        df = pd.read_excel(file)
+    except Exception as e:
+        return Response({"error": f"Invalid Excel file. {str(e)}"}, status=400)
+    
+    saved_books = []
+    errors = []
+
+    for idx, row in df.iterrows():
+        serializer = BookSerializer(data={
+            "title": row.get("title"),
+            "author": row.get("author"),
+            "unique_id": row.get("unique_id"),
+            "publish_year": row.get("publish_year"),
+            "copies_available": row.get("copies_available", 1),
+            "is_available": row.get("is_available", True),
+        })
+        if serializer.is_valid():
+            serializer.save(owner=request.user)
+            saved_books.append(serializer.data)
+        else:
+            errors.append({"row": idx + 2, "errors": serializer.errors})  # row+2 for Excel indexing
+
+    return Response({"saved": saved_books, "errors": errors})
+
 
 
 
